@@ -1,130 +1,92 @@
-Arduino-XP-BMS-MkII 
-Rev. 1.0 - 2022-01-14
--------------------------------
-A BMS for Valence XP batteries, designed to run on Arduino or similar hardware.
-Merger of original Seb code and portions of Crelex's Valence Battery Reader code by Daren T.
-https://github.com/J00ky/Arduino-XP-BMS-MkII
+# Arduino XP BMS MkII
 
-Original code by Seb Francis -> https://diysolarforum.com/members/seb303.13166/
-https://github.com/seb303/Arduino-XP-BMS
+Safety-first Teensy 3.2 firmware for monitoring six-cell Valence XP modules and controlling charge/load enable outputs.
 
-Crelex's Valence Battery Reader code
-https://github.com/Crelex/Valance-Battery-Reader
+## Supported configuration
 
-Overview
---------
-The MkII version of the Arduino XP BMS has the following features:
-* Automatically searches for battery modules and identifies their ID numbers.
-* Identified modules are listed by ID#, model type, and serial number during initial communications.
-* Compatible for Rev. 1 (black) and Rev. 2 (green) models.
-* Any comms failure, including BMS disconnection, will result in BMS sending the wakeup command but battery system config info is retained for faster system recovery.
-* "Poor man's balancing" - send a digital signal on pin 17 to the battery charger to switch into constant voltage mode. Signal is triggered by
-  the following logic:
-  1. monitor all module voltages and look for the module with the lowest voltage (this is the minimum module voltage)
-  2. check for modules with cell voltages >3.28V AND total voltage is >100mV higher than the minimum module voltage
-  2. trigger balancing on any module where voltage is >100mV higher than the minimum module voltage AND 
-     the identified module has a min cell voltage >3.28V
-  3. maintain balancing until minimum module voltage is within 100mV of the identified balancing module
-  This method of balancing (setting CV mode) relies on the voltage relaxation effect, this is expected to be very slow.
-  While this balancing mode is on, the "over voltage" LED will flash. 
+- Teensy 3.2
+- One to eight six-cell modules
+- Module IDs 1 through 48, discovered at startup
+- Series system-voltage calculation
+- RS485 on Serial1 pins 0/1 at 115,200 baud after the 9,600-baud wake message
+- Direct HC-06 telemetry on Serial2 TX pin 10 / RX pin 9 at 38,400 baud, 8N1
+- USB Serial at 115,200 baud for diagnostics, commands, and a mirror of the coherent telemetry packet when a host is attached
 
-Still designed to provide monitoring of Valence XP batteries in order to:
-* Keep the Valence internal BMS awake so the intra-module balancing is active.
-* Provide a signal to a charge controller to disable charging in case of individual cell over-voltage or over-temperature.
-* Provide a signal to a load disconnect relay in case of individual cell under-voltage or over-temperature.
-* Provide warning and shutdown status outputs for over-temperature, over-voltage, under-voltage and communication error.
-* Provide basic event logging to EEPROM.
-* Have a mode for long term storage / not in use, where it will let the batteries rest at a lower SOC.
+New module IDs require a restart. Previously discovered modules recover automatically after a communications interruption.
 
-Current Limitations
--------------------
-* Does not handle true inter-battery balancing, so only suitable for parallel installations. Balancing code still needs debugging.
-* Only up to 6 cell / 19V batteries.
-* Low temperature checking code added but not implemented or validated.
+The firmware uses a 50 ms per-response timeout, waits at least 100 ms between complete scans, retries unsuccessful discovery after a one-second backoff, and limits telemetry to 1 Hz. Discovery rejects an installation if a ninth responding module is found; the control outputs remain disabled.
 
-Hardware
---------
-This sketch has been primarily written for and tested on Teensy 3.2 hardware, but should run on any Arduino or similar board that
-has a dedicated hardware serial port. In order to view the console output you'll need either native-USB support (e.g. Teensy) or
-in the case of Arduino a board with multiple serial ports, such as the Mega or Due (since Arduino USB uses one of the serial ports).
+## Thresholds
 
-The clock speed will need to be adequate for good serial timing at 115200 baud. Unless using a specific crystal which is an exact
-multiple of 115200, a good rule of thumb would be to have a clock speed around 20Mhz or more to ensure good enough timing. This
-does also depend on how the hardware is implemented - for example, the Teensy 3.2 has a high resolution baud rate for the hardware
-UART, and so is particularly accurate. The exact serial timing error depends on the clock rate:  
-At 24 MHz: -0.08%  <- plenty accurate enough, and uses the least power  
-At 48 Mhz: +0.04%  
-At 96 MHz: -0.02%  
+All comparisons use fixed-point integer units. Assertion is strict (`>` for high thresholds and `<` for low thresholds); clearing includes the hysteresis boundary.
 
-Requires the following additional components:
-* A 5V voltage regulator
-* An external RS485 transceiver such as the MAX485 (if the MCU inputs are not 5V tolerant run the RO/RX through a potential divider)
-* Some LEDs/resistors for the status display
-* Something to convert the logic level Enable outputs to the voltage/current levels required for the charging & load control
+| Condition | Warning assertion | Shutdown assertion | Hysteresis clearing |
+| --- | ---: | ---: | --- |
+| Cell voltage | above 3.850 V | above 3.950 V | at or below 3.650/3.750 V |
+| Cell temperature | above 60.00 C | above 65.00 C | at or below 58.00/63.00 C |
+| PCBA temperature | above 80.00 C | above 85.00 C | at or below 78.00/83.00 C |
+| Cell undervoltage | below 2.850 V | below 2.600 V | at or above 3.050/2.800 V |
 
-Installation & Configuration
-----------------------------
-* Install Arduino IDE, and if using Teensy hardware: Teensyduino - https://www.pjrc.com/teensy/teensyduino.html
-* Select board and clock rate (e.g. 24 MHz is plenty fast enough).
-* Define the pin numbers where the outputs and RS485 driver are connected.
-* Define other board-specific parameters, such as port for Serial Monitor, EEPROM size, etc.
-* Configure the desired thresholds for voltage, temperature and SOC.  
-  The default settings are quite conservative, chosen to maximise battery life rather than squeeze out every last Ah of
-  capacity. The values used by the official Valence U-BMS are much less conservative, and are shown in the comments.
-* This version will automatically populate the battery modules with their unique IDs.
+Storage mode starts charging when any module is at or below 40.0% SOC and stops when a module reaches 50.0%, provided no module is still at or below 40.0%. The storage charging state never changes unless every discovered module has a valid same-scan SOC value.
 
-Console interface
------------------
-```
-Commands can be entered via the Serial Monitor.
-help         - show available commands
-debug 0      - turn off debugging output
-debug 1      - debugging output shows errors, status changes and other occasional info
-debug 2      - in addition to the above, debugging output shows continuous status and readings from batteries
-debug 21     - show status and readings from batteries once, then switch to debug level 1
-debug 2 <n>  - show status and readings from batteries every <n> seconds, otherwise as debug level 1
-mode normal  - enter normal mode
-mode storage - enter long term storage mode
-log read     - read events log from EEPROM
-log clear    - clear events log
-reset cw     - resets CommsWarning status (otherwise this stays on once triggered)
-```
+## Safety behavior
 
-EEPROM data
------------
-```
-The top 32 bytes are reserved for storing settings persistently:
-Byte 0: debug level (0, 1, 2)
-Byte 1: mode (0 = normal, 1 = storage)
+Charge and load outputs are set to their inactive levels before their pins become outputs. They are never included in the startup lamp test and remain disabled until discovery is successful and one complete module scan passes.
 
-The rest of the EEPROM stores a 32 byte data packet whenever the status changes:
+Voltage and temperature reads for every module run before SOC/current and balance reads. A valid dangerous reading asserts its warning or shutdown immediately. Later communication failures cannot undo that assertion, and alarms only clear after every module supplies valid relevant readings within the configured hysteresis boundary.
 
-0  PO   0   0   ST  STC  EC  EL  OTW OTS OVW OVS UVW UVS CW  CS (uint16_t bitmap)
-     PO is set for the first event after power on
-     ST is set when storage mode is active
-     STC is set when storage mode is active and charging (i.e. storageMinSOC has been reached)
+Any incomplete four-transaction scan counts as a communication failure. Two consecutive incomplete scans assert communications shutdown and disable both charge and load. The communications warning remains latched until reset with the console command.
 
-Timestamp of event = number of seconds since power-on (uint32_t)
+Before connecting high-energy hardware, bench-test the inactive/active electrical levels on pins 3 and 4 and verify every shutdown output with the charger and contactors disconnected.
 
-Values from the battery, only if the status change was triggered by a value from a specific battery:
-Battery id (uint8_t)  (0 if no battery values)
-V1 (int16_t)
-V2 (int16_t)
-V3 (int16_t)
-V4 (int16_t)
-T1 (int16_t)
-T2 (int16_t)
-T3 (int16_t)
-T4 (int16_t)
-PCBA (int16_t)
-SOC (uint16_t)
-CURRENT (int16_t)
+## Telemetry wiring and format
 
-3 bytes unused
-```
-License
--------
-This sketch is released under GPLv3 and comes with no warranty or guarantees. Use at your own risk!
-Libraries used in this sketch may have licenses that differ from the one governing this sketch.
-Please consult the repositories of those libraries for information.
+This firmware requires the revised direct-HC-06 wiring; rewire before uploading. The Nano is no longer part of the link.
 
+| Signal | Teensy connection |
+| --- | --- |
+| UV warning indicator (UVW), formerly pin 9 | Pin 18, through its existing LED resistor |
+| UV shutdown indicator (UVS), formerly pin 10 | Pin 17, through its existing LED resistor |
+| HC-06 RXD | Pin 10 (Serial2 TX) |
+| HC-06 TXD | Pin 9 (Serial2 RX) |
+| HC-06 GND | Common circuit ground |
+| HC-06 breakout VCC | Regulated 5 V bus, only for a breakout rated for 5 V input |
+
+Serial signals are direct 3.3 V logic: remove the Nano's voltage divider. A bare HC-06 module requires a 3.3 V supply instead. Keep the HC-06 configured at 38,400 baud; the firmware does not issue AT commands to change its baud rate. Incoming Bluetooth bytes are discarded in bounded batches; no remote commands are implemented. Pins 13, 15 and underside pad 31 are not used by this link. The original PDF schematic and board photos show the old indicator wiring; use the table above for this revision.
+
+Telemetry is independent of the USB diagnostic level and is emitted at most once per second. A valid packet contains one row per battery:
+
+    Battery <id> <V1> <V2> <V3> <V4> <V5> <V6> <VT> <T1> <T2> <T3> <T4> <T5> <T6> <PCBA> <SOC> <CURRENT> <BAL>
+    Total System Voltage: <volts>
+    Minimum Voltage: <volts>
+
+The packet ends with a blank line. An incomplete scan emits the following frame so the current Android parser rejects the frame, retains its last valid values, and marks them stale:
+
+    Telemetry unavailable: incomplete scan
+    Total System Voltage: unavailable
+    Minimum Voltage: unavailable
+
+That frame also ends with a blank line.
+
+The same valid or unavailable frame is mirrored to the Teensy's native USB serial connection. This lets the Android app use a USB host/OTG connection directly alongside the HC-06 path. USB diagnostics can appear before a telemetry frame; consumers must frame on the blank line and ignore non-telemetry lines, as the Android parser does.
+
+## Console commands
+
+- help
+- debug 0, debug 1, debug 2, and debug 21
+- debug 2 <seconds>
+- mode normal and mode storage
+- reset cw
+- log read and log clear are reserved and report that event logging is disabled
+
+## EEPROM status
+
+The debug level and operating mode remain stored at the original top two EEPROM settings addresses.
+
+Event logging is deliberately disabled. The legacy implementation described records as 32 bytes but advanced its write pointer by 38 or 41 bytes depending on the event. It must receive a versioned record layout, bounds tests, and a migration policy before it can safely be restored.
+
+## Verification
+
+Compile the main sketch for Teensy 3.2 / 3.1 with USB Type Serial. The no-dependency test sketch under tests/BmsCoreTests covers known CRC data, short/long/corrupt response validation, signed register decoding, SOC scaling, threshold/hysteresis boundaries, incomplete-scan communication behavior, storage behavior, and rollover-safe timing.
+
+The current production build uses 26,924 bytes of flash and 4,056 bytes of dynamic memory, leaving 61,480 bytes reported for local variables on Teensy 3.2. Hardware-only checks still required before deployment are output-level verification through reset/POST/discovery/comms loss, sparse and overflow discovery cases, delayed/corrupt response injection, before/after scan timing, safety assertion when a later dashboard read fails, relocated UV indicators, and both USB and direct HC-06 telemetry paths.

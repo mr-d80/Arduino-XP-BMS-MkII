@@ -1,0 +1,4 @@
+# Local test captures and editor-generated recovery/export files.
+Arduino-XP-BMS_output*.txt
+*.autosave
+hardware/kicad_export.kicad_sym
