@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "BmsCore.h"
+#include "PacedTelemetry.h"
 
 // The old event-log implementation used nominal 32-byte records but advanced
 // by 38 or 41 bytes. It is deliberately unavailable until a versioned format
@@ -42,6 +43,11 @@ constexpr uint32_t kWakePauseMs = 500;
 constexpr uint32_t kResponseTimeoutMs = 50;
 constexpr uint32_t kScanPauseMs = 100;
 constexpr uint32_t kTelemetryIntervalMs = 1000;
+constexpr size_t kTelemetryFrameCapacity = 2048;
+constexpr size_t kTelemetryChunkSize = 32;
+// 32 bytes at 38400 baud 8N1 occupy 8.34 ms. Bench testing found
+// 80/100 ms stable with Android receivers; 50 ms still lost characters.
+constexpr uint32_t kTelemetryChunkIntervalMs = 80;
 constexpr uint32_t kDiscoveryRetryMs = 1000;
 constexpr long kMaximumDebugIntervalSeconds = 86400;
 constexpr uint8_t kMaximumConsecutiveReadErrors = 2;
@@ -194,6 +200,8 @@ uint32_t g_lastScanDurationMs = 0;
 RunState g_runState = RunState::Discovering;
 char g_consoleInput[32] = {};
 size_t g_consoleInputLength = 0;
+PacedTelemetry<Config::kTelemetryFrameCapacity, Config::kTelemetryChunkSize,
+               Config::kTelemetryChunkIntervalMs> g_telemetryTx;
 
 constexpr uint16_t statusMask(StatusBit bit) {
     return static_cast<uint16_t>(1U << static_cast<uint8_t>(bit));
@@ -1003,6 +1011,25 @@ void emitBatteryRow(Print &output, const ModuleSnapshot &snapshot) {
     output.println(snapshot.balance);
 }
 
+void emitOperationalStatus(Print &output) {
+    output.print(F("BMS Status: EC="));
+    output.print(statusSet(g_status, STATUS_EC) ? '1' : '0');
+    output.print(F(" EL="));
+    output.print(statusSet(g_status, STATUS_EL) ? '1' : '0');
+    output.print(F(" OVW="));
+    output.print(statusSet(g_status, STATUS_OVW) ? '1' : '0');
+    output.print(F(" OVS="));
+    output.print(statusSet(g_status, STATUS_OVS) ? '1' : '0');
+    output.print(F(" UVW="));
+    output.print(statusSet(g_status, STATUS_UVW) ? '1' : '0');
+    output.print(F(" UVS="));
+    output.print(statusSet(g_status, STATUS_UVS) ? '1' : '0');
+    output.print(F(" OTW="));
+    output.print(statusSet(g_status, STATUS_OTW) ? '1' : '0');
+    output.print(F(" OTS="));
+    output.println(statusSet(g_status, STATUS_OTS) ? '1' : '0');
+}
+
 uint32_t totalSystemMillivolts() {
     uint32_t total = 0;
     for (uint8_t index = 0; index < g_moduleCount; ++index) {
@@ -1023,6 +1050,7 @@ void emitValidTelemetryFrame(Print &output) {
     for (uint8_t index = 0; index < g_moduleCount; ++index) {
         emitBatteryRow(output, g_snapshots[index]);
     }
+    emitOperationalStatus(output);
     output.print(F("Total System Voltage: "));
     printFixed(output, static_cast<int32_t>(totalSystemMillivolts()), 3);
     output.println();
@@ -1033,8 +1061,12 @@ void emitValidTelemetryFrame(Print &output) {
 }
 
 void emitValidTelemetry() {
-    emitValidTelemetryFrame(Telemetry);
-    Telemetry.flush();
+    if (g_telemetryTx.beginFrame()) {
+        emitValidTelemetryFrame(g_telemetryTx);
+        if (!g_telemetryTx.finishFrame() && g_debugLevel > 0) {
+            Console.println(F("Telemetry TX frame exceeded buffer; frame discarded."));
+        }
+    }
     // Mirror the exact packet to native USB when a host is attached. Diagnostics
     // may precede it, but the packet delimiter and summary labels remain intact.
     if (Console) {
@@ -1044,14 +1076,19 @@ void emitValidTelemetry() {
 
 void emitUnavailableTelemetryFrame(Print &output) {
     output.println(F("Telemetry unavailable: incomplete scan"));
+    emitOperationalStatus(output);
     output.println(F("Total System Voltage: unavailable"));
     output.println(F("Minimum Voltage: unavailable"));
     output.println();
 }
 
 void emitUnavailableTelemetry() {
-    emitUnavailableTelemetryFrame(Telemetry);
-    Telemetry.flush();
+    if (g_telemetryTx.beginFrame()) {
+        emitUnavailableTelemetryFrame(g_telemetryTx);
+        if (!g_telemetryTx.finishFrame() && g_debugLevel > 0) {
+            Console.println(F("Telemetry TX frame exceeded buffer; frame discarded."));
+        }
+    }
     if (Console) {
         emitUnavailableTelemetryFrame(Console);
     }
@@ -1114,6 +1151,10 @@ void printDetailedScan(bool complete) {
     Console.print(F(", duration ms: "));
     Console.println(g_lastScanDurationMs);
     if (complete) {
+        // A detailed USB scan is itself parseable telemetry. Include the same
+        // self-describing status row so debug level 2 cannot momentarily erase
+        // otherwise current relay/alarm state in downstream consumers.
+        emitOperationalStatus(Console);
         Console.print(F("Total System Voltage: "));
         printFixed(Console, static_cast<int32_t>(totalSystemMillivolts()), 3);
         Console.println();
@@ -1170,6 +1211,7 @@ void saveModeSetting(bool storageMode) {
 void printHelp() {
     Console.println(F("Available commands:"));
     Console.println(F("help         - show available commands"));
+    Console.println(F("telemetry stats - show local Bluetooth transmit counters"));
     Console.println(F("debug 0      - turn off diagnostic output"));
     Console.println(F("debug 1      - errors and status changes"));
     Console.println(F("debug 2      - continuous complete scan output"));
@@ -1183,7 +1225,20 @@ void printHelp() {
 }
 
 void handleConsoleCommand(const char *command) {
-    if (strcmp(command, "debug 0") == 0) {
+    if (strcmp(command, "telemetry stats") == 0) {
+        Console.print(F("Telemetry TX: queued="));
+        Console.print(g_telemetryTx.queuedFrames);
+        Console.print(F(" submitted="));
+        Console.print(g_telemetryTx.submittedFrames);
+        Console.print(F(" skipped="));
+        Console.print(g_telemetryTx.skippedFrames);
+        Console.print(F(" rejected="));
+        Console.print(g_telemetryTx.rejectedFrames);
+        Console.print(F(" bytes="));
+        Console.print(g_telemetryTx.transmittedBytes);
+        Console.print(F(" pending="));
+        Console.println(g_telemetryTx.pending() ? 1 : 0);
+    } else if (strcmp(command, "debug 0") == 0) {
         g_debugLevel = 0;
         g_debugIntervalMs = 0;
         g_debugOneShot = false;
@@ -1338,6 +1393,7 @@ void setup() {
 }
 
 void loop() {
+    g_telemetryTx.service(Telemetry, millis());
     processConsoleInput();
     // RX is wired for future features; Bluetooth cannot execute console commands.
     // Bound the discard work so incoming traffic cannot hold up the scan loop.
