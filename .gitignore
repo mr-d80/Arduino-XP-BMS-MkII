@@ -2,3 +2,4 @@
 Arduino-XP-BMS_output*.txt
 *.autosave
 hardware/kicad_export.kicad_sym
+build/
