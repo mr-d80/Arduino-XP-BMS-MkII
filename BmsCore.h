@@ -28,6 +28,12 @@ struct CommunicationState {
     bool shutdown;
 };
 
+enum class BalanceActivity : uint8_t {
+    Unavailable,
+    Inactive,
+    Active
+};
+
 inline uint16_t modbusCrc(const uint8_t *buffer, size_t length) {
     uint16_t crc = 0xFFFF;
     for (size_t position = 0; position < length; ++position) {
@@ -45,6 +51,58 @@ inline uint16_t modbusCrc(const uint8_t *buffer, size_t length) {
 
 inline uint16_t decodeUnsigned16(uint8_t highByte, uint8_t lowByte) {
     return static_cast<uint16_t>((static_cast<uint16_t>(highByte) << 8U) | lowByte);
+}
+
+inline bool parseBalanceDiagnosticModuleId(const char *text, uint8_t &moduleId) {
+    if (text == nullptr || *text == '\0') {
+        return false;
+    }
+
+    uint16_t parsed = 0;
+    for (const char *digit = text; *digit != '\0'; ++digit) {
+        if (*digit < '0' || *digit > '9') {
+            return false;
+        }
+        parsed = static_cast<uint16_t>(parsed * 10U + static_cast<uint8_t>(*digit - '0'));
+        if (parsed > 48U) {
+            return false;
+        }
+    }
+    if (parsed == 0U) {
+        return false;
+    }
+
+    moduleId = static_cast<uint8_t>(parsed);
+    return true;
+}
+
+// OEM 0x001E statusword bit 8 is the general balance-activity flag.
+inline bool balanceGeneralActive(uint16_t rawStatusword) {
+    return (rawStatusword & 0x0100U) != 0U;
+}
+
+// OEM bank-state bits 0..5 are active-low; upper bits are not bank flags.
+inline uint8_t activeBalanceBankMask(uint8_t rawBankState) {
+    return static_cast<uint8_t>((~rawBankState) & 0x3FU);
+}
+
+// OEM register 0x005A bit 4 clear means balance is enabled.
+inline bool oemBalanceEnabled(uint16_t rawEnableWord) {
+    return (rawEnableWord & 0x0010U) == 0U;
+}
+
+inline BalanceActivity inferBalanceActivity(
+    bool statuswordValid,
+    uint16_t rawStatusword,
+    bool bankStateValid,
+    uint8_t rawBankState
+) {
+    if (!statuswordValid || !bankStateValid) {
+        return BalanceActivity::Unavailable;
+    }
+    return balanceGeneralActive(rawStatusword) || activeBalanceBankMask(rawBankState) != 0U
+        ? BalanceActivity::Active
+        : BalanceActivity::Inactive;
 }
 
 inline ResponseError validateResponse(

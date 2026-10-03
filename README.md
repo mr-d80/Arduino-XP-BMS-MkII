@@ -82,6 +82,7 @@ At debug level 2, each complete human-readable USB scan also includes the same `
 
 - help
 - telemetry stats
+- balance diag <id>
 - debug 0, debug 1, debug 2, and debug 21
 - debug 2 <seconds>
 - mode normal and mode storage
@@ -89,6 +90,8 @@ At debug level 2, each complete human-readable USB scan also includes the same `
 - log read and log clear are reserved and report that event logging is disabled
 
 `telemetry stats` prints boot-session counters: `queued` (complete frames accepted), `submitted` (frames fully handed to Serial2), `skipped` (report due while a previous frame was pending), `rejected` (empty or oversized frame), `bytes` (bytes handed to Serial2), and `pending` (0 or 1). Submission is not an acknowledgement from the HC-06 or phone. `rejected` should remain zero; `queued - submitted` should be zero or one. Some skips are possible when scans delay output, especially with eight modules. Counters wrap at 32 bits.
+
+`balance diag <id>` requests a one-shot, USB-only read-only capture for a discovered module. It reports the general balance status word, six OEM-decoded bank flags, and a separately validated balancing-enable word. No balancing-control or calibration-mode writes are sent, and the existing battery-row `BAL` field is unchanged. See [balancing diagnostics](docs/balancing_diagnostics.md) for capture instructions, validity rules, and interpretation limits.
 
 ## Bluetooth loss bench test
 
@@ -111,4 +114,6 @@ Event logging is deliberately disabled. The legacy implementation described reco
 
 Compile the main sketch for Teensy 3.2 / 3.1 with USB Type Serial. The no-dependency test sketch under tests/BmsCoreTests covers known CRC data, short/long/corrupt response validation, signed register decoding, SOC scaling, threshold/hysteresis boundaries, incomplete-scan communication behavior, storage behavior, and rollover-safe timing.
 
-The paced-transmission build uses 28,880 bytes of flash and 6,128 bytes of dynamic memory, leaving 59,408 bytes reported for local variables on Teensy 3.2. Hardware-only checks still required before deployment are output-level verification through reset/POST/discovery/comms loss, sparse and overflow discovery cases, delayed/corrupt response injection, before/after scan timing, safety assertion when a later dashboard read fails, relocated UV indicators, and both USB and direct HC-06 telemetry paths.
+The same core assertions can run on a host by compiling `tests/host/BmsCoreSketchTests.cpp` with C++14 and both `tests/host` and the repository root as include directories. It mocks only console/delay calls and uses the production core header. `tests/host/BalanceDiagnosticsTests.cpp` also exercises the strict ID parser, OEM bank/status/enable masks, and combined-activity validity gates without Arduino dependencies.
+
+The read-only diagnostic build uses 32,304 bytes of flash and 6,160 bytes of dynamic memory, leaving 59,376 bytes reported for local variables on Teensy 3.2. Hardware-only checks still required before deployment are output-level verification through reset/POST/discovery/comms loss, sparse and overflow discovery cases, delayed/corrupt response injection, before/after scan timing, safety assertion when a later dashboard read fails, relocated UV indicators, and both USB and direct HC-06 telemetry paths. Physical balancing behavior still requires the revision-specific captures described in the diagnostic guide.

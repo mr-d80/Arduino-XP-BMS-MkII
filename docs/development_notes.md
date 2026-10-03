@@ -1,5 +1,14 @@
 # Development notes
 
+## 2026-10-02 - Read-only balancing investigation
+
+- OEM static inspection revealed a broader activity indication than the original/current Arduino general `BAL` bit: it combines that bit with six active-low bank flags already present in the SOC/current response. OEM normal monitoring also sends enable-balancing and exit-calibration-mode commands, but their necessity/support on the user's rev. 1 module remains unconfirmed. No control writes are added here.
+- `balance diag <id>` queues one discovered module for a USB-only capture after the next normal scan has committed safety/comms state and emitted telemetry. Raw general/bank data is retained only from that scan's validated reads; a separate bounded `0x005A` read reports enabled/disabled only when valid. Its failure is diagnostic-only and does not change the normal four-read completeness rule.
+- Normal telemetry `BAL` intentionally retains the original general-bit meaning pending physical captures. OEM-style combined activity is diagnostic-only and unavailable if either source is invalid. The enable word is a later sample, not an atomic part of the scan. Capture procedure and evidence limits are in `docs/balancing_diagnostics.md`.
+- Baseline production compile: Teensy core 1.62.0, Teensy 3.2 / USB Serial / 96 MHz / Faster; 28,880 bytes flash and 6,128 bytes RAM. Hardware verification and physical root cause remain outstanding; no upload or serial commands are performed by the agent.
+- Verification: updated production compile passed at 32,304 bytes flash and 6,160 bytes RAM (+32 bytes RAM); core test sketch compile passed at 11,448 bytes flash and 2,404 bytes RAM. MSVC C++14 execution of the core sketch assertions, focused diagnostic decoder tests, and existing paced-telemetry regression tests all passed. The paced host build retains its pre-existing size_t-to-uint32_t warning. Independent source review found no blocking findings; the full sketch was not exercised against simulated or physical serial hardware.
+- USB framing crosscheck: the diagnostic-only block uses no telemetry prefixes and is ignored by Android's framer. If a failed normal scan has already printed `Battery ... failed` lines before the report deadline, the diagnostic's blank terminator can close an error-only block and surface an Android protocol warning; no valid telemetry is replaced. This is limited to an explicit capture during a normal-read failure and resembles existing incomplete debug-table behavior.
+
 ## 2026-09-21 - Android receiver pacing validation
 
 - Independent Bluetooth terminal captures on Nexus 6P and Pixel 6 also contained missing text, correcting the earlier suspicion of an XP BMS-only receive defect. Workstation PuTTY was clean. This does not establish the precise layer responsible for loss.
