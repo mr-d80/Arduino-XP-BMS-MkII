@@ -6,6 +6,7 @@ All notable changes to this firmware are documented here.
 
 ### Added
 
+- Added one-shot USB `balance diag <id>` captures of general activity, six bank flags, and balancing-enable state without sending balancing-control commands or changing telemetry.
 - Added USB `telemetry stats` counters for queued, submitted, skipped, and rejected Bluetooth frames and submitted bytes.
 
 - Added logical charge/load output and voltage/temperature warning/shutdown state to every valid or unavailable telemetry packet.

@@ -133,6 +133,8 @@ struct ModuleSnapshot {
     uint16_t socTenthsPercent;
     int16_t currentCentiAmps;
     uint8_t balance;
+    uint16_t rawBalanceStatusword;
+    uint8_t rawBalanceBankState;
     bool voltageValid;
     bool temperatureValid;
     bool socCurrentValid;
@@ -170,7 +172,12 @@ const uint8_t kReadSocAndCurrent[] = {
     0x00, 0x03, 0x00, 0x39, 0x00, 0x0A, 0x00, 0x00, 0x0D, 0x0A
 };
 const uint8_t kReadBalance[] = {
+    // One 0x001E statusword; the validated payload is response bytes 3 and 4.
     0x00, 0x03, 0x00, 0x1E, 0x00, 0x01, 0x00, 0x00, 0x0D, 0x0A
+};
+const uint8_t kReadBalanceEnable[] = {
+    // Read OEM balance enable word 0x005A; bit 4 clear means enabled.
+    0x00, 0x03, 0x00, 0x5A, 0x00, 0x01, 0x00, 0x00, 0x0D, 0x0A
 };
 const uint8_t kReadModel[] = {
     0x00, 0x03, 0x00, 0xEE, 0x00, 0x01, 0x00, 0x00, 0x0D, 0x0A
@@ -197,6 +204,7 @@ uint32_t g_lastTelemetryMs = 0;
 uint32_t g_nextScanMs = 0;
 uint32_t g_nextDiscoveryMs = 0;
 uint32_t g_lastScanDurationMs = 0;
+uint8_t g_pendingBalanceDiagModuleId = 0;
 RunState g_runState = RunState::Discovering;
 char g_consoleInput[32] = {};
 size_t g_consoleInputLength = 0;
@@ -261,6 +269,13 @@ void printPaddedUnsigned(Print &output, uint32_t value, uint8_t width) {
         divisor /= 10U;
     }
     output.print(value);
+}
+
+void printHexPadded(Print &output, uint16_t value, uint8_t width) {
+    static const char digits[] = "0123456789ABCDEF";
+    for (int8_t shift = static_cast<int8_t>((width - 1U) * 4U); shift >= 0; shift -= 4) {
+        output.print(digits[(value >> shift) & 0x0FU]);
+    }
 }
 
 void printStatusBits(Print &output, uint16_t status) {
@@ -808,6 +823,8 @@ void readSocAndCurrent(ModuleSnapshot &snapshot) {
     }
     snapshot.socTenthsPercent = BmsCore::socTenthsPercent(response[16]);
     snapshot.currentCentiAmps = BmsCore::decodeSigned16(response[17], response[18]);
+    // The validated 0x0039 block carries the OEM bank-state byte at offset 15.
+    snapshot.rawBalanceBankState = response[15];
     snapshot.socCurrentValid = true;
 }
 
@@ -826,6 +843,7 @@ void readBalanceState(ModuleSnapshot &snapshot) {
         return;
     }
     snapshot.balance = response[3] & 0x01U;
+    snapshot.rawBalanceStatusword = BmsCore::decodeUnsigned16(response[3], response[4]);
     snapshot.balanceValid = true;
 }
 
@@ -1165,6 +1183,175 @@ void printDetailedScan(bool complete) {
     Console.println();
 }
 
+bool findModuleSnapshot(uint8_t moduleId, uint8_t &snapshotIndex) {
+    for (uint8_t index = 0; index < g_moduleCount; ++index) {
+        if (g_snapshots[index].id == moduleId) {
+            snapshotIndex = index;
+            return true;
+        }
+    }
+    return false;
+}
+
+void printBalanceDiagnosticVoltages(const ModuleSnapshot &snapshot) {
+    if (!snapshot.voltageValid) {
+        Console.println(F("Cell voltages and spread: unavailable (voltage read invalid)"));
+        return;
+    }
+
+    uint16_t minimum = UINT16_MAX;
+    uint16_t maximum = 0;
+    Console.print(F("Cell voltages (V): "));
+    for (uint8_t cell = 0; cell < Config::kCellCount; ++cell) {
+        const uint16_t voltage = snapshot.cellMillivolts[cell];
+        minimum = min(minimum, voltage);
+        maximum = max(maximum, voltage);
+        if (cell > 0U) {
+            Console.print(F(", "));
+        }
+        printFixed(Console, voltage, 3);
+    }
+    Console.print(F("; spread: "));
+    printFixed(Console, static_cast<int32_t>(maximum - minimum), 3);
+    Console.println(F(" V"));
+}
+
+void printBalanceStatusword(const ModuleSnapshot &snapshot) {
+    if (!snapshot.balanceValid) {
+        Console.println(F("Raw 0x001E statusword: unavailable (balance read invalid)"));
+        Console.print(F("Telemetry BAL (first data byte bit 0): unavailable; "));
+        Console.println(F("general activity bit 8: unavailable"));
+        return;
+    }
+
+    Console.print(F("Raw 0x001E statusword: 0x"));
+    printHexPadded(Console, snapshot.rawBalanceStatusword, 4);
+    Console.println();
+    Console.print(F("Telemetry BAL (first data byte bit 0): "));
+    Console.print(snapshot.balance);
+    Console.print(F("; general activity bit 8: "));
+    Console.println(BmsCore::balanceGeneralActive(snapshot.rawBalanceStatusword) ? 1 : 0);
+}
+
+void printBalanceBankState(const ModuleSnapshot &snapshot) {
+    if (!snapshot.socCurrentValid) {
+        Console.println(F("Raw 0x0039 bank byte: unavailable (SOC/current read invalid)"));
+        for (uint8_t bank = 1; bank <= 6; ++bank) {
+            Console.print(F("Bank "));
+            Console.print(bank);
+            Console.println(F(" active: unavailable"));
+        }
+        Console.println(F("Active bank mask: unavailable"));
+        return;
+    }
+
+    const uint8_t activeMask = BmsCore::activeBalanceBankMask(snapshot.rawBalanceBankState);
+    Console.print(F("Raw 0x0039 bank byte: 0x"));
+    printHexPadded(Console, snapshot.rawBalanceBankState, 2);
+    Console.println();
+    for (uint8_t bank = 0; bank < 6; ++bank) {
+        Console.print(F("Bank "));
+        Console.print(static_cast<uint8_t>(bank + 1U));
+        Console.print(F(" active: "));
+        Console.println((activeMask & static_cast<uint8_t>(1U << bank)) != 0U ? 1 : 0);
+    }
+    Console.print(F("Active bank mask: 0x"));
+    printHexPadded(Console, activeMask, 2);
+    Console.println();
+}
+
+void printBalanceEnableRead(uint8_t moduleId) {
+    uint8_t response[kBalanceResponseLength] = {};
+    const TransactionResult result = transact(
+        moduleId,
+        kReadBalanceEnable,
+        sizeof(kReadBalanceEnable),
+        0x02,
+        response,
+        sizeof(response)
+    );
+    if (!result.ok()) {
+        Console.println(F("Raw 0x005A enable word: unavailable"));
+        Console.println(F("OEM balance enable state: unavailable"));
+        Console.print(F("OEM balance enable read error: "));
+        Console.print(transactionErrorText(result.error));
+        Console.print(F("; received length: "));
+        Console.print(result.received);
+        Console.println(F(" bytes"));
+        return;
+    }
+
+    const uint16_t rawEnableWord = BmsCore::decodeUnsigned16(response[3], response[4]);
+    Console.print(F("Raw 0x005A enable word: 0x"));
+    printHexPadded(Console, rawEnableWord, 4);
+    Console.print(F("; OEM balance enable state: "));
+    Console.println(BmsCore::oemBalanceEnabled(rawEnableWord) ? F("enabled") : F("disabled"));
+}
+
+void printBalanceDiagnostic(
+    uint8_t moduleId,
+    bool scanComplete,
+    uint32_t scanCompletedAtMs
+) {
+    uint8_t snapshotIndex = 0;
+    if (!findModuleSnapshot(moduleId, snapshotIndex)) {
+        Console.print(F("Balance diag module "));
+        Console.println(moduleId);
+        Console.println(F("Error: module snapshot unavailable after scan."));
+        Console.println();
+        return;
+    }
+
+    const ModuleSnapshot &snapshot = g_snapshots[snapshotIndex];
+    Console.print(F("Balance diag module "));
+    Console.println(moduleId);
+    Console.print(F("Scan complete: "));
+    Console.print(scanComplete ? F("yes") : F("no"));
+    Console.print(F("; duration: "));
+    Console.print(g_lastScanDurationMs);
+    Console.println(F(" ms"));
+    Console.print(F("Scan completed at uptime: "));
+    Console.print(scanCompletedAtMs);
+    Console.println(F(" ms"));
+    Console.print(F("Module scan complete: "));
+    Console.println(snapshot.complete() ? F("yes") : F("no"));
+    printBalanceDiagnosticVoltages(snapshot);
+    printBalanceStatusword(snapshot);
+    printBalanceBankState(snapshot);
+
+    const BmsCore::BalanceActivity activity = BmsCore::inferBalanceActivity(
+        snapshot.balanceValid,
+        snapshot.rawBalanceStatusword,
+        snapshot.socCurrentValid,
+        snapshot.rawBalanceBankState
+    );
+    Console.print(F("OEM combined balance activity: "));
+    switch (activity) {
+        case BmsCore::BalanceActivity::Unavailable:
+            Console.println(F("unavailable"));
+            break;
+        case BmsCore::BalanceActivity::Inactive:
+            Console.println(F("inactive"));
+            break;
+        case BmsCore::BalanceActivity::Active:
+            Console.println(F("active"));
+            break;
+    }
+
+    printBalanceEnableRead(moduleId);
+    Console.println(F("Enable mode was sampled after the scan; these values are not simultaneous."));
+    Console.println();
+}
+
+void servicePendingBalanceDiagnostic(bool scanComplete, uint32_t scanCompletedAtMs) {
+    if (g_pendingBalanceDiagModuleId == 0U) {
+        return;
+    }
+    const uint8_t moduleId = g_pendingBalanceDiagModuleId;
+    g_pendingBalanceDiagModuleId = 0;
+    printBalanceDiagnostic(moduleId, scanComplete, scanCompletedAtMs);
+}
+
 void performScan() {
     const uint32_t scanStartedAt = millis();
     resetSnapshots();
@@ -1186,11 +1373,13 @@ void performScan() {
     updateStorageState();
     const bool complete = scanComplete();
     updateCommunicationState(complete);
-    g_lastScanDurationMs = static_cast<uint32_t>(millis() - scanStartedAt);
+    const uint32_t scanCompletedAtMs = millis();
+    g_lastScanDurationMs = static_cast<uint32_t>(scanCompletedAtMs - scanStartedAt);
     if (shouldPrintDetailedScan()) {
         printDetailedScan(complete);
     }
     maybeEmitTelemetry(complete);
+    servicePendingBalanceDiagnostic(complete, scanCompletedAtMs);
 
     if (!complete && statusSet(g_status, STATUS_CS)) {
         if (g_debugLevel > 0) {
@@ -1212,6 +1401,7 @@ void printHelp() {
     Console.println(F("Available commands:"));
     Console.println(F("help         - show available commands"));
     Console.println(F("telemetry stats - show local Bluetooth transmit counters"));
+    Console.println(F("balance diag <id> - show read-only balance diagnostics"));
     Console.println(F("debug 0      - turn off diagnostic output"));
     Console.println(F("debug 1      - errors and status changes"));
     Console.println(F("debug 2      - continuous complete scan output"));
@@ -1224,8 +1414,64 @@ void printHelp() {
     Console.println(F("log clear    - reserved; EEPROM event logging is disabled"));
 }
 
+void handleBalanceDiagnosticCommand(const char *command) {
+    static const char usage[] = "balance diag <id> (decimal module ID 1..48)";
+    if (strcmp(command, "balance diag") == 0) {
+        Console.print(F("Usage: "));
+        Console.println(usage);
+        return;
+    }
+
+    static const char commandPrefix[] = "balance diag ";
+    if (strncmp(command, commandPrefix, sizeof(commandPrefix) - 1U) != 0) {
+        Console.print(F("Usage: "));
+        Console.println(usage);
+        return;
+    }
+
+    uint8_t moduleId = 0;
+    if (!BmsCore::parseBalanceDiagnosticModuleId(
+            command + sizeof(commandPrefix) - 1U,
+            moduleId
+        )) {
+        Console.print(F("Usage: "));
+        Console.println(usage);
+        return;
+    }
+    if (g_runState != RunState::Running) {
+        Console.println(F("Balance diag error: modules are not discovered and running."));
+        return;
+    }
+
+    bool discovered = false;
+    for (uint8_t index = 0; index < g_moduleCount; ++index) {
+        discovered = discovered || g_moduleIds[index] == moduleId;
+    }
+    if (!discovered) {
+        Console.print(F("Balance diag error: module "));
+        Console.print(moduleId);
+        Console.println(F(" is not discovered."));
+        return;
+    }
+    if (g_pendingBalanceDiagModuleId != 0U) {
+        Console.print(F("Balance diag busy: module "));
+        Console.print(g_pendingBalanceDiagModuleId);
+        Console.println(F(" is already queued."));
+        return;
+    }
+
+    g_pendingBalanceDiagModuleId = moduleId;
+    Console.print(F("Balance diag module "));
+    Console.print(moduleId);
+    Console.println(F(" queued for the next scan."));
+}
+
 void handleConsoleCommand(const char *command) {
-    if (strcmp(command, "telemetry stats") == 0) {
+    static const char balanceCommand[] = "balance diag";
+    const size_t balanceCommandLength = sizeof(balanceCommand) - 1U;
+    if (strncmp(command, balanceCommand, balanceCommandLength) == 0) {
+        handleBalanceDiagnosticCommand(command);
+    } else if (strcmp(command, "telemetry stats") == 0) {
         Console.print(F("Telemetry TX: queued="));
         Console.print(g_telemetryTx.queuedFrames);
         Console.print(F(" submitted="));

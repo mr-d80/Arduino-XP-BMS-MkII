@@ -92,6 +92,114 @@ void runDecodeTests() {
     expectTrue(BmsCore::socTenthsPercent(255) == 1000, F("SOC upper endpoint"));
 }
 
+void runBalanceDiagnosticTests() {
+    struct IdCase {
+        const char *text;
+        bool valid;
+        uint8_t expectedId;
+    };
+    const IdCase idCases[] = {
+        {"1", true, 1},
+        {"48", true, 48},
+        {"01", true, 1},
+        {"", false, 0},
+        {"0", false, 0},
+        {"49", false, 0},
+        {"+1", false, 0},
+        {"1x", false, 0},
+        {" 1", false, 0}
+    };
+    for (const IdCase &test : idCases) {
+        uint8_t moduleId = 0;
+        const bool valid = BmsCore::parseBalanceDiagnosticModuleId(test.text, moduleId);
+        expectTrue(
+            valid == test.valid && (!valid || moduleId == test.expectedId),
+            F("strict balance diagnostic module ID parsing")
+        );
+    }
+
+    struct StatusCase {
+        uint16_t raw;
+        bool generalActive;
+    };
+    const StatusCase statusCases[] = {
+        {0x0000, false},
+        {0x0001, false},
+        {0x0100, true},
+        {0x0200, false},
+        {0x8100, true}
+    };
+    for (const StatusCase &test : statusCases) {
+        expectTrue(
+            BmsCore::balanceGeneralActive(test.raw) == test.generalActive,
+            F("general balance activity uses only statusword bit 8")
+        );
+    }
+
+    struct BankCase {
+        uint8_t raw;
+        uint8_t activeMask;
+    };
+    const BankCase bankCases[] = {
+        {0xFF, 0x00},
+        {0xFE, 0x01},
+        {0xFD, 0x02},
+        {0xC0, 0x3F},
+        {0x80, 0x3F},
+        {0xBF, 0x00}
+    };
+    for (const BankCase &test : bankCases) {
+        expectTrue(
+            BmsCore::activeBalanceBankMask(test.raw) == test.activeMask,
+            F("bank activity is active-low over bits 0 through 5 only")
+        );
+    }
+
+    struct EnableCase {
+        uint16_t raw;
+        bool enabled;
+    };
+    const EnableCase enableCases[] = {
+        {0x0000, true},
+        {0x0001, true},
+        {0x0010, false},
+        {0x0110, false},
+        {0x0020, true}
+    };
+    for (const EnableCase &test : enableCases) {
+        expectTrue(
+            BmsCore::oemBalanceEnabled(test.raw) == test.enabled,
+            F("OEM enable state uses register bit 4")
+        );
+    }
+
+    expectTrue(
+        BmsCore::inferBalanceActivity(false, 0x0100, true, 0xFF) ==
+            BmsCore::BalanceActivity::Unavailable,
+        F("invalid statusword makes combined balance inference unavailable")
+    );
+    expectTrue(
+        BmsCore::inferBalanceActivity(true, 0x0000, false, 0xFE) ==
+            BmsCore::BalanceActivity::Unavailable,
+        F("invalid bank state makes combined balance inference unavailable")
+    );
+    expectTrue(
+        BmsCore::inferBalanceActivity(true, 0x0100, true, 0xFF) ==
+            BmsCore::BalanceActivity::Active,
+        F("general activity makes combined balance inference active")
+    );
+    expectTrue(
+        BmsCore::inferBalanceActivity(true, 0x0000, true, 0xFE) ==
+            BmsCore::BalanceActivity::Active,
+        F("active bank makes combined balance inference active")
+    );
+    expectTrue(
+        BmsCore::inferBalanceActivity(true, 0x0000, true, 0xFF) ==
+            BmsCore::BalanceActivity::Inactive,
+        F("valid inactive status and banks infer inactive")
+    );
+}
+
 void runThresholdTests() {
     expectTrue(BmsCore::assertHigh(3951, 3950), F("high alarm asserts above threshold"));
     expectTrue(!BmsCore::assertHigh(3950, 3950), F("high alarm excludes threshold"));
@@ -175,6 +283,7 @@ void setup() {
     runCrcTests();
     runResponseValidationTests();
     runDecodeTests();
+    runBalanceDiagnosticTests();
     runThresholdTests();
     runStorageTests();
     runIncompleteScanTests();
