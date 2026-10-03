@@ -26,5 +26,6 @@ All notable changes to this firmware are documented here.
 
 ### Fixed
 
+- Corrected telemetry `BAL` to include active cell-bank flags as well as the general balancing flag, so rev. 1 modules with bank-only activity receive Android's balancing indicator.
 - Prevented charge/load activation during startup testing and applied safety shutdowns even when later reads fail.
 - Prevented alarm clearing from incomplete scans, recursive no-battery recovery, stale module data reuse, storage SOC scaling errors, discovery index corruption, serial-number truncation, unchecked CRC data, and output buffer overruns.

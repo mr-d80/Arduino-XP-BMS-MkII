@@ -28,18 +28,21 @@ or a retained value from an earlier scan.
 
 ## Interpretation
 
-| Source | OEM interpretation | Existing telemetry |
+| Source | OEM interpretation | Telemetry |
 | --- | --- | --- |
-| `0x001E`, complete 16-bit status word | General activity is mask `0x0100` | The final battery-row `BAL` field continues to use this bit only |
-| `0x0039`, full-response byte 15 | Bits 0 through 5 correspond to banks 1 through 6; a clear bit means active, so the active mask is `(~raw) & 0x3F` | Already received in the SOC/current transaction; now retained for diagnostics only |
+| `0x001E`, complete 16-bit status word | General activity is mask `0x0100` | Contributes to the final battery-row `BAL` field |
+| `0x0039`, full-response byte 15 | Bits 0 through 5 correspond to banks 1 through 6; a clear bit means active, so the active mask is `(~raw) & 0x3F` | Contributes to `BAL` using the existing SOC/current transaction |
 | `0x005A`, complete 16-bit word | Mask `0x0010` clear means OEM balancing enabled; set means disabled | Optional diagnostic read only; no telemetry field is added |
 
-The OEM-style combined activity indication is general activity OR any active
-bank. It is available only when both source reads succeeded in the same scan.
+The telemetry `BAL` and OEM-style combined diagnostic indication are general
+activity OR any active bank. They use the same decoder and are available only
+when both source reads succeeded in the same scan. The diagnostic separately
+shows the raw general activity, which can remain zero while `BAL` is one.
 These are interpretations observed in OEM software, not proof of physical
 shunt current or verified behavior on every module firmware revision.
 
-- Active banks with general `BAL=0` would explain an incomplete indication.
+- Active banks with a zero general flag explain why older general-only `BAL`
+  firmware missed the balancing indication.
 - A validated enable word with the inhibit bit set is evidence of an inhibited
   state; a failed read is not evidence that balancing is disabled.
 - Enabled with no reported activity does not establish the reason. Module
@@ -55,8 +58,9 @@ CRC/envelope-validating transaction helper. That read can add up to the existing
 failure does not count as an incomplete normal scan or change output/alarm state.
 
 All diagnostic output is USB-only. Bluetooth pacing, the 17-value battery row,
-Android's blue-dot interpretation, the existing general `BAL` decoder, safety
-outputs, EEPROM settings, and communications-failure rules remain unchanged.
+Android's blue-dot interpretation, safety outputs, EEPROM settings, and
+communications-failure rules remain unchanged. Only the reported `BAL` activity
+meaning is broadened to match the OEM-style combined indication.
 There is no automatic enable-balancing or calibration-mode write in this change.
 
 The diagnostic-only block is ignored by Android's USB framer. During a failed
@@ -75,8 +79,20 @@ executable SHA-256 was
 The sequence had no revision gate, but support/necessity on module 18 is not
 established. OEM "Start Read" is therefore not a passive read-only comparison.
 
-The earlier original-Arduino parity check still holds for the general `BAL`
-request and bit; it did not establish parity with the OEM's broader indication
-or initialization sequence. Collect these read-only captures before proposing
-any control writes or changing the telemetry meaning. Hardware capture and
-revision-specific behavior are not established by compilation or host tests.
+The earlier original-Arduino parity check still holds for the general request
+and bit; it did not establish parity with the OEM's broader indication or
+initialization sequence. On 2026-10-03 the user supplied these validated
+diagnostic captures:
+
+| Module | General status | Bank byte | Active bank mask | Combined `BAL` |
+| --- | --- | --- | --- | --- |
+| 8 (rev. 2), active | `0x0100` | `0x1D` | `0x22` (banks 2 and 6) | `1` |
+| 18 (rev. 1), active | `0x0000` | `0x01` | `0x3E` (banks 2 through 6) | `1` |
+| 8 and 18, earlier inactive captures | `0x0000` | `0x3F` | `0x00` | `0` |
+
+All of these captures reported enable word `0x0000`. The module 18 capture
+establishes a reporting discrepancy in the old general-only indication, not a
+need for enable-balancing writes or independent proof of physical shunt current.
+After uploading the correction, confirm module 18's normal USB/Bluetooth row
+ends in `1` when bank flags are active and that Android displays its blue dot.
+Compilation and decoder tests cannot establish that end-to-end hardware result.

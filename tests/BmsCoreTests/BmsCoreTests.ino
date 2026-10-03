@@ -142,8 +142,12 @@ void runBalanceDiagnosticTests() {
     };
     const BankCase bankCases[] = {
         {0xFF, 0x00},
+        {0x3F, 0x00},
         {0xFE, 0x01},
         {0xFD, 0x02},
+        {0x1D, 0x22},
+        {0xDD, 0x22},
+        {0x00, 0x3F},
         {0xC0, 0x3F},
         {0x80, 0x3F},
         {0xBF, 0x00}
@@ -173,31 +177,59 @@ void runBalanceDiagnosticTests() {
         );
     }
 
-    expectTrue(
-        BmsCore::inferBalanceActivity(false, 0x0100, true, 0xFF) ==
-            BmsCore::BalanceActivity::Unavailable,
-        F("invalid statusword makes combined balance inference unavailable")
-    );
-    expectTrue(
-        BmsCore::inferBalanceActivity(true, 0x0000, false, 0xFE) ==
-            BmsCore::BalanceActivity::Unavailable,
-        F("invalid bank state makes combined balance inference unavailable")
-    );
-    expectTrue(
-        BmsCore::inferBalanceActivity(true, 0x0100, true, 0xFF) ==
-            BmsCore::BalanceActivity::Active,
-        F("general activity makes combined balance inference active")
-    );
-    expectTrue(
-        BmsCore::inferBalanceActivity(true, 0x0000, true, 0xFE) ==
-            BmsCore::BalanceActivity::Active,
-        F("active bank makes combined balance inference active")
-    );
-    expectTrue(
-        BmsCore::inferBalanceActivity(true, 0x0000, true, 0xFF) ==
-            BmsCore::BalanceActivity::Inactive,
-        F("valid inactive status and banks infer inactive")
-    );
+    struct ActivityCase {
+        bool statuswordValid;
+        uint16_t rawStatusword;
+        bool bankStateValid;
+        uint8_t rawBankState;
+        BmsCore::BalanceActivity expectedActivity;
+        int8_t expectedTelemetryBal;
+        int16_t expectedBankMask;
+    };
+    const ActivityCase activityCases[] = {
+        // Captured rev. 2 module: statusword bit 8 plus banks 2 and 6 active.
+        {true, 0x0100, true, 0x1D, BmsCore::BalanceActivity::Active, 1, 0x22},
+        // Captured rev. 1 module: bank flags alone report banks 2 through 6 active.
+        {true, 0x0000, true, 0x01, BmsCore::BalanceActivity::Active, 1, 0x3E},
+        {true, 0x0000, true, 0x3F, BmsCore::BalanceActivity::Inactive, 0, 0x00},
+        {true, 0x0100, true, 0xFF, BmsCore::BalanceActivity::Active, 1, 0x00},
+        // Upper two bits differ, but the six bank flags and result are unchanged.
+        {true, 0x0000, true, 0xDD, BmsCore::BalanceActivity::Active, 1, 0x22},
+        {false, 0x0100, false, 0x1D, BmsCore::BalanceActivity::Unavailable, -1, -1},
+        {false, 0x0100, true, 0xFF, BmsCore::BalanceActivity::Unavailable, -1, 0x00},
+        {true, 0x0000, false, 0x01, BmsCore::BalanceActivity::Unavailable, -1, -1}
+    };
+    for (const ActivityCase &test : activityCases) {
+        const BmsCore::BalanceActivity activity = BmsCore::inferBalanceActivity(
+            test.statuswordValid,
+            test.rawStatusword,
+            test.bankStateValid,
+            test.rawBankState
+        );
+        expectTrue(
+            activity == test.expectedActivity,
+            F("combined balance activity matches captured and validity cases")
+        );
+        if (activity == BmsCore::BalanceActivity::Unavailable) {
+            expectTrue(
+                test.expectedTelemetryBal == -1,
+                F("unavailable combined activity is not published as BAL zero")
+            );
+        } else {
+            const uint8_t telemetryBal = activity == BmsCore::BalanceActivity::Active ? 1U : 0U;
+            expectTrue(
+                telemetryBal == static_cast<uint8_t>(test.expectedTelemetryBal),
+                F("combined telemetry BAL maps active and inactive to 1 and 0")
+            );
+        }
+        if (test.bankStateValid) {
+            expectTrue(
+                BmsCore::activeBalanceBankMask(test.rawBankState) ==
+                    static_cast<uint8_t>(test.expectedBankMask),
+                F("combined balance regression uses the six low active-low bank flags")
+            );
+        }
+    }
 }
 
 void runThresholdTests() {

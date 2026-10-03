@@ -65,6 +65,8 @@ Bluetooth uses a 2,048-byte frame buffer and submits at most 32 bytes to Serial2
 
 `EC` and `EL` are the logical charging/load enable states actually applied to the outputs; their values are independent of electrical pin inversion. The other fields are the latched overvoltage, undervoltage, and overtemperature warning/shutdown bits. A shutdown can therefore be reported at the same time as its warning.
 
+`BAL` is `1` when either the general activity bit in register `0x001E` or any of the six active-low bank flags from register `0x0039` reports balancing; otherwise it is `0`. Both responses must be valid in the same scan before a complete numeric battery row is published. This matches the OEM-style activity indication and covers observed rev. 1 bank-only activity. It reports module activity, not measured shunt current, and does not enable or force balancing. The 17-value row and Android parser remain unchanged.
+
 The packet ends with a blank line. An incomplete scan emits the following frame so the Android app retains its last valid battery values, marks them stale, and still receives current controller status:
 
     Telemetry unavailable: incomplete scan
@@ -91,7 +93,7 @@ At debug level 2, each complete human-readable USB scan also includes the same `
 
 `telemetry stats` prints boot-session counters: `queued` (complete frames accepted), `submitted` (frames fully handed to Serial2), `skipped` (report due while a previous frame was pending), `rejected` (empty or oversized frame), `bytes` (bytes handed to Serial2), and `pending` (0 or 1). Submission is not an acknowledgement from the HC-06 or phone. `rejected` should remain zero; `queued - submitted` should be zero or one. Some skips are possible when scans delay output, especially with eight modules. Counters wrap at 32 bits.
 
-`balance diag <id>` requests a one-shot, USB-only read-only capture for a discovered module. It reports the general balance status word, six OEM-decoded bank flags, and a separately validated balancing-enable word. No balancing-control or calibration-mode writes are sent, and the existing battery-row `BAL` field is unchanged. See [balancing diagnostics](docs/balancing_diagnostics.md) for capture instructions, validity rules, and interpretation limits.
+`balance diag <id>` requests a one-shot, USB-only read-only capture for a discovered module. It reports the general balance status word, six OEM-decoded bank flags, the combined telemetry `BAL`, and a separately validated balancing-enable word. No balancing-control or calibration-mode writes are sent. See [balancing diagnostics](docs/balancing_diagnostics.md) for capture instructions, validity rules, and interpretation limits.
 
 ## Bluetooth loss bench test
 
@@ -116,4 +118,4 @@ Compile the main sketch for Teensy 3.2 / 3.1 with USB Type Serial. The no-depend
 
 The same core assertions can run on a host by compiling `tests/host/BmsCoreSketchTests.cpp` with C++14 and both `tests/host` and the repository root as include directories. It mocks only console/delay calls and uses the production core header. `tests/host/BalanceDiagnosticsTests.cpp` also exercises the strict ID parser, OEM bank/status/enable masks, and combined-activity validity gates without Arduino dependencies.
 
-The read-only diagnostic build uses 32,304 bytes of flash and 6,160 bytes of dynamic memory, leaving 59,376 bytes reported for local variables on Teensy 3.2. Hardware-only checks still required before deployment are output-level verification through reset/POST/discovery/comms loss, sparse and overflow discovery cases, delayed/corrupt response injection, before/after scan timing, safety assertion when a later dashboard read fails, relocated UV indicators, and both USB and direct HC-06 telemetry paths. Physical balancing behavior still requires the revision-specific captures described in the diagnostic guide.
+The combined-balancing diagnostic build uses 32,308 bytes of flash and 6,128 bytes of dynamic memory, leaving 59,408 bytes reported for local variables on Teensy 3.2. Hardware-only checks still required before deployment are output-level verification through reset/POST/discovery/comms loss, sparse and overflow discovery cases, delayed/corrupt response injection, before/after scan timing, safety assertion when a later dashboard read fails, relocated UV indicators, and both USB and direct HC-06 telemetry paths. The supplied revision-specific captures confirm reported bank-only activity; the corrected telemetry and Android blue dot still require post-upload confirmation as described in the diagnostic guide.
