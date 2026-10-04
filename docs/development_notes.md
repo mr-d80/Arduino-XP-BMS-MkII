@@ -1,5 +1,13 @@
 # Development notes
 
+## 2026-10-03 - Combined balancing activity in telemetry
+
+- User hardware captures resolved the rev. 1 reporting discrepancy: module 18 returned general status `0x0000`, bank byte `0x01` (active banks 2–6), and enabled state `0x0000`. Module 8 returned general status `0x0100` and bank byte `0x1D` (banks 2/6 active). Both earlier inactive captures had bank byte `0x3F`. This is module-reported activity, not a measurement of balancing current or proof across all firmware revisions.
+- Telemetry `BAL` now uses the same validity-gated general-OR-bank decoder as diagnostics, derived from the current snapshot rather than a cached general-only flag. Failed SOC/current or general-status reads still prevent a complete numeric report. Diagnostics distinguish raw general activity from combined telemetry activity; the optional enable word does not gate activity reporting.
+- No new transactions, balance-enable/calibration/control writes, threshold changes, output changes, transport changes, EEPROM changes, or Android code changes are needed. The final battery-row field remains numeric `0`/`1` and the row still contains 17 values. The previously documented general-only interpretation is superseded by this correction.
+- Verification: Teensy core 1.62.0 / Teensy 3.2 / USB Serial / 96 MHz / Faster production compile passed at 32,308 bytes flash and 6,128 bytes RAM (32 bytes RAM less than the general-only diagnostic build). The core test sketch compiled at 11,692 bytes flash / 2,404 bytes RAM. All 83 core assertions, focused host diagnostic tests, and existing paced-telemetry regression tests passed. Regression tables include both user captures, inactive `0x3F`, general-only activity, upper-bit masking, and missing source responses. No hardware upload or end-to-end corrected telemetry capture was performed.
+- Independent review found no blocking findings and confirmed that all USB/Bluetooth/debug row paths retain the 17-field contract, current-scan validity, and unchanged control behavior.
+
 ## 2026-10-02 - Read-only balancing investigation
 
 - OEM static inspection revealed a broader activity indication than the original/current Arduino general `BAL` bit: it combines that bit with six active-low bank flags already present in the SOC/current response. OEM normal monitoring also sends enable-balancing and exit-calibration-mode commands, but their necessity/support on the user's rev. 1 module remains unconfirmed. No control writes are added here.

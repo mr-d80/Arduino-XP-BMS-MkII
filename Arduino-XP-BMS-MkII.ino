@@ -132,7 +132,6 @@ struct ModuleSnapshot {
     uint32_t moduleMillivolts;
     uint16_t socTenthsPercent;
     int16_t currentCentiAmps;
-    uint8_t balance;
     uint16_t rawBalanceStatusword;
     uint8_t rawBalanceBankState;
     bool voltageValid;
@@ -146,6 +145,15 @@ struct ModuleSnapshot {
             temperatureValid,
             socCurrentValid,
             balanceValid
+        );
+    }
+
+    BmsCore::BalanceActivity balanceActivity() const {
+        return BmsCore::inferBalanceActivity(
+            balanceValid,
+            rawBalanceStatusword,
+            socCurrentValid,
+            rawBalanceBankState
         );
     }
 };
@@ -842,7 +850,6 @@ void readBalanceState(ModuleSnapshot &snapshot) {
         reportTransactionError(snapshot.id, F("balance read"), result);
         return;
     }
-    snapshot.balance = response[3] & 0x01U;
     snapshot.rawBalanceStatusword = BmsCore::decodeUnsigned16(response[3], response[4]);
     snapshot.balanceValid = true;
 }
@@ -1009,6 +1016,11 @@ void updateCommunicationState(bool complete) {
 }
 
 void emitBatteryRow(Print &output, const ModuleSnapshot &snapshot) {
+    const BmsCore::BalanceActivity activity = snapshot.balanceActivity();
+    if (activity == BmsCore::BalanceActivity::Unavailable) {
+        return;
+    }
+
     output.print(F("Battery "));
     output.print(snapshot.id);
     for (uint8_t cell = 0; cell < Config::kCellCount; ++cell) {
@@ -1026,7 +1038,7 @@ void emitBatteryRow(Print &output, const ModuleSnapshot &snapshot) {
     output.print(' ');
     printFixed(output, snapshot.currentCentiAmps, 2);
     output.print(' ');
-    output.println(snapshot.balance);
+    output.println(activity == BmsCore::BalanceActivity::Active ? 1 : 0);
 }
 
 void emitOperationalStatus(Print &output) {
@@ -1216,21 +1228,34 @@ void printBalanceDiagnosticVoltages(const ModuleSnapshot &snapshot) {
     Console.println(F(" V"));
 }
 
+void printBalanceActivity(const __FlashStringHelper *label, BmsCore::BalanceActivity activity) {
+    Console.print(label);
+    switch (activity) {
+        case BmsCore::BalanceActivity::Unavailable:
+            Console.println(F("unavailable"));
+            break;
+        case BmsCore::BalanceActivity::Inactive:
+            Console.println(F("inactive (0)"));
+            break;
+        case BmsCore::BalanceActivity::Active:
+            Console.println(F("active (1)"));
+            break;
+    }
+}
+
 void printBalanceStatusword(const ModuleSnapshot &snapshot) {
     if (!snapshot.balanceValid) {
         Console.println(F("Raw 0x001E statusword: unavailable (balance read invalid)"));
-        Console.print(F("Telemetry BAL (first data byte bit 0): unavailable; "));
-        Console.println(F("general activity bit 8: unavailable"));
-        return;
+        Console.println(F("General activity bit 8: unavailable"));
+    } else {
+        Console.print(F("Raw 0x001E statusword: 0x"));
+        printHexPadded(Console, snapshot.rawBalanceStatusword, 4);
+        Console.println();
+        Console.print(F("General activity bit 8: "));
+        Console.println(BmsCore::balanceGeneralActive(snapshot.rawBalanceStatusword) ? 1 : 0);
     }
 
-    Console.print(F("Raw 0x001E statusword: 0x"));
-    printHexPadded(Console, snapshot.rawBalanceStatusword, 4);
-    Console.println();
-    Console.print(F("Telemetry BAL (first data byte bit 0): "));
-    Console.print(snapshot.balance);
-    Console.print(F("; general activity bit 8: "));
-    Console.println(BmsCore::balanceGeneralActive(snapshot.rawBalanceStatusword) ? 1 : 0);
+    printBalanceActivity(F("Telemetry BAL (combined): "), snapshot.balanceActivity());
 }
 
 void printBalanceBankState(const ModuleSnapshot &snapshot) {
@@ -1319,24 +1344,7 @@ void printBalanceDiagnostic(
     printBalanceStatusword(snapshot);
     printBalanceBankState(snapshot);
 
-    const BmsCore::BalanceActivity activity = BmsCore::inferBalanceActivity(
-        snapshot.balanceValid,
-        snapshot.rawBalanceStatusword,
-        snapshot.socCurrentValid,
-        snapshot.rawBalanceBankState
-    );
-    Console.print(F("OEM combined balance activity: "));
-    switch (activity) {
-        case BmsCore::BalanceActivity::Unavailable:
-            Console.println(F("unavailable"));
-            break;
-        case BmsCore::BalanceActivity::Inactive:
-            Console.println(F("inactive"));
-            break;
-        case BmsCore::BalanceActivity::Active:
-            Console.println(F("active"));
-            break;
-    }
+    printBalanceActivity(F("OEM combined balance activity: "), snapshot.balanceActivity());
 
     printBalanceEnableRead(moduleId);
     Console.println(F("Enable mode was sampled after the scan; these values are not simultaneous."));
